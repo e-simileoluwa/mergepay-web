@@ -78,7 +78,11 @@ export function ExpenseCard({
   }
 
   return (
-    <Card className={isPending ? "opacity-70 bg-cream/50" : undefined}>
+    <Card
+      className={isPending ? "opacity-70 bg-cream/50" : undefined}
+      data-testid="expense-card"
+      data-expense-id={expense.id}
+    >
       <div className="flex items-stretch">
         {selectable && (
           <button
@@ -161,6 +165,8 @@ export function ExpenseCard({
               return (
                 <div
                   key={share.id}
+                  data-testid="expense-share"
+                  data-user-id={share.userId}
                   className="flex items-center justify-between rounded-lg border-2 border-ink bg-white px-3 py-1.5"
                 >
                   <span className="flex items-center gap-2">

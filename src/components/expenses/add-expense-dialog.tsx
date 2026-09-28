@@ -79,7 +79,7 @@ export function AddExpenseDialog({
   const [assetKey, setAssetKey] = useState(() => supportedAssetKey(activeAsset));
   const [payerUserId, setPayerUserId] = useState(currentUserId);
   const [splitType, setSplitType] = useState<SplitType>("equal");
-  const [participants, setParticipants] = useState<string[]>(members.map((m) => m.userId));
+  const [participants, setParticipants] = useState<string[]>(() => members.map((m) => m.userId));
   const [custom, setCustom] = useState<Record<string, string>>({});
   const [percent, setPercent] = useState<Record<string, string>>({});
   // Bumped when a draft is restored so the calculator remounts with its values.
@@ -133,6 +133,24 @@ export function AddExpenseDialog({
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [touched, setTouched] = useState<Record<string, boolean>>({});
   const [showErrors, setShowErrors] = useState(false);
+
+  // The dialog mounts as soon as the group page opens, which is usually before
+  // the group's members have loaded — so `participants` starts empty and never
+  // picks up the list. Adopt members as they arrive while nothing is selected
+  // yet, and drop anyone who has left the group; a deliberate selection is left
+  // alone. Without this, a cold visit to a group offers no participants and the
+  // expense cannot be created at all.
+  useEffect(() => {
+    const memberIdsNow = members.map((m) => m.userId);
+    setParticipants((current) => {
+      if (current.length === 0) return memberIdsNow;
+      const known = new Set(memberIdsNow);
+      const stillMembers = current.filter((id) => known.has(id));
+      if (stillMembers.length === current.length) return current;
+      return stillMembers.length > 0 ? stillMembers : memberIdsNow;
+    });
+  }, [members]);
+
   const walletDisconnected = useWalletDisconnected();
   // The offline store is the single source of truth for connectivity (the
   // network listeners in AppShell keep it current), so the form and the sync
@@ -547,7 +565,7 @@ export function AddExpenseDialog({
           <Button type="button" variant="ghost" onClick={onClose}>
             Cancel
           </Button>
-          <Button type="submit" loading={pending} disabled={submitBlocked}>
+          <Button type="submit" loading={pending} disabled={submitBlocked} data-testid="add-expense-confirm">
             {isOffline ? "Save offline" : "Add Expense"}
           </Button>
         </div>

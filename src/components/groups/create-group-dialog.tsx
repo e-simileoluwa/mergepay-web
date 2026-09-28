@@ -82,6 +82,7 @@ export function CreateGroupDialog({
             type="submit"
             loading={create.isPending}
             disabled={!name.trim() || isOffline}
+            data-testid="create-group-confirm"
             title={
               isOffline ? "You’re offline — reconnect to create a group" : undefined
             }

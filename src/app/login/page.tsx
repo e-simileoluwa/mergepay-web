@@ -202,6 +202,7 @@ export default function LoginPage() {
                 className="mt-7 flex items-center justify-center gap-2 rounded-xl border-2 border-ink bg-butter-pale px-4 py-3 text-sm"
                 role="status"
                 aria-live="polite"
+                data-testid="login-restoring"
               >
                 <Loader2 className="h-4 w-4 animate-spin" />
                 Restoring your session…
@@ -212,6 +213,7 @@ export default function LoginPage() {
                 size="lg"
                 onClick={handleConnect}
                 disabled={loading || authLoading}
+                data-testid="login-connect"
               >
                 {loading || authLoading ? (
                   <>
@@ -228,7 +230,7 @@ export default function LoginPage() {
             )}
 
             {!restoring && activeWalletPublicKey && (
-              <p className="mt-3 text-center text-xs text-ink/60">
+              <p className="mt-3 text-center text-xs text-ink/60" data-testid="login-wallet">
                 Freighter is on{" "}
                 <span className="font-mono font-bold">
                   {shortKey(activeWalletPublicKey)}

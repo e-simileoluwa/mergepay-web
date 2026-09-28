@@ -39,7 +39,10 @@ export default function GroupsPage() {
             <Button variant="outline" onClick={() => setJoinOpen(true)}>
               <Users className="h-4 w-4" /> Join group
             </Button>
-            <Button onClick={() => setCreateOpen(true)}>
+            <Button
+              onClick={() => setCreateOpen(true)}
+              data-testid="groups-create"
+            >
               <Plus className="h-4 w-4" /> New group
             </Button>
           </div>
@@ -68,7 +71,12 @@ export default function GroupsPage() {
         ) : (
           <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             {groups.map((group) => (
-              <Link key={group.id} href={`/groups/${group.id}`}>
+              <Link
+                key={group.id}
+                href={`/groups/${group.id}`}
+                data-testid="group-card"
+                data-group-id={group.id}
+              >
                 <Card className="h-full transition-all hover:-translate-y-1 hover:shadow-brutal-lg">
                   <CardContent className="p-5 flex flex-col justify-between h-full">
                     <div>

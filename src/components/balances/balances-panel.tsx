@@ -93,7 +93,13 @@ export function BalancesPanel({
         ) : (
           <div className="grid gap-2 sm:grid-cols-2">
             {balances.map((b) => (
-              <Card key={b.userId} className="flex items-center justify-between p-3">
+              <Card
+                key={b.userId}
+                className="flex items-center justify-between p-3"
+                data-testid="balance-row"
+                data-user-id={b.userId}
+                data-net={b.net}
+              >
                 <span className="flex items-center gap-2">
                   <Avatar user={b.user} size="sm" />
                   <span className="text-sm font-bold">
@@ -128,7 +134,11 @@ export function BalancesPanel({
             {simplified.map((s, i) => {
               const youPay = s.fromUserId === currentUserId;
               return (
-                <Card key={i}>
+                <Card
+                  key={i}
+                  data-testid="settlement-path"
+                  data-from-user-id={s.fromUserId}
+                >
                   <CardContent className="flex flex-wrap items-center justify-between gap-3 py-3">
                     <div className="flex items-center gap-2">
                       <Avatar user={s.from} size="sm" />
