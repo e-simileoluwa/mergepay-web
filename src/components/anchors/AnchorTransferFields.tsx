@@ -15,6 +15,7 @@
  */
 
 import { Input, Label, FieldHint, FormError } from "@/components/ui/input";
+import { isBlockedDecimalKey, isTypableAmount } from "@/lib/expenseValidation";
 import type { AnchorSessionKind } from "@/lib/types";
 import type { AnchorTransferFieldErrors } from "@/lib/validations/anchor";
 
@@ -98,7 +99,18 @@ export function AnchorTransferFields({
           autoComplete="off"
           placeholder="e.g. 25.00"
           value={values.amount}
-          onChange={(event) => update("amount", event.target.value)}
+          onChange={(event) => {
+            // Refuse the keystroke rather than the submission: the anchor
+            // rejects anything outside Stellar's 7-decimal precision, and a
+            // character that never lands cannot be mistyped.
+            if (isTypableAmount(event.target.value)) {
+              update("amount", event.target.value);
+            }
+          }}
+          onKeyDown={(event) => {
+            if (isBlockedDecimalKey(event.key)) event.preventDefault();
+          }}
+          className={errors.amount ? "border-flamingo" : undefined}
           aria-invalid={errors.amount ? true : undefined}
           aria-describedby={
             errors.amount ? `${amountId}-error` : `${amountId}-hint`

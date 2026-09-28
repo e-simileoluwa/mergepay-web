@@ -62,6 +62,16 @@ function toStroops(plain: string, decimals: number): bigint {
   return BigInt(intPart) * scale + BigInt(frac || "0");
 }
 
+/** Inverse of {@link toStroops}: render integer units back as a decimal string. */
+function unitsToDecimal(units: bigint, decimals: number): string {
+  const scale = 10n ** BigInt(decimals);
+  const negative = units < 0n;
+  const abs = negative ? -units : units;
+  const whole = abs / scale;
+  const frac = (abs % scale).toString().padStart(decimals, "0").replace(/0+$/, "");
+  return `${negative ? "-" : ""}${frac ? `${whole}.${frac}` : `${whole}`}`;
+}
+
 /**
  * Validate an expense amount before any processing.
  */
@@ -148,15 +158,22 @@ export type CreateGroupFormInput = z.infer<typeof createGroupSchema>;
 
 /**
  * Expense share allocation schema.
+ *
+ * `amount` is the per-member allocation of a custom split. Zero is allowed
+ * (an unset row), but the string has to be plain decimal notation within the
+ * asset's precision — anything else cannot be represented on the ledger, and
+ * a float here would make the split-sum check in `createExpenseSchema`
+ * approximate rather than exact.
  */
 export const expenseShareInputSchema = z.object({
   userId: z.string().trim().min(1, "Member ID is required"),
   amount: z
     .string()
     .optional()
-    .refine((val) => val === undefined || (Boolean(val.trim()) && !isNaN(Number(val)) && Number(val) >= 0), {
-      message: "Amount must be a non-negative number",
-    }),
+    .refine(
+      (val) => val === undefined || decimalQuantityRegex().test(val.trim()),
+      `Share amount must be a plain number with at most ${DEFAULT_ASSET_DECIMALS} decimal places`
+    ),
   percent: z
     .number()
     .optional()
@@ -165,8 +182,24 @@ export const expenseShareInputSchema = z.object({
     }),
 });
 
+/** Plain decimal quantity, zero included: `^\d+(\.\d{1,n})?$` for the asset. */
+function decimalQuantityRegex(decimals: number = DEFAULT_ASSET_DECIMALS): RegExp {
+  return new RegExp(`^\\d+(?:\\.\\d{1,${decimals}})?$`);
+}
+
+/** Count the fractional digits a decimal string carries. */
+function decimalPlacesOf(value: string): number {
+  const dot = value.indexOf(".");
+  return dot === -1 ? 0 : value.length - dot - 1;
+}
+
 /**
  * Expense creation form validation schema.
+ *
+ * Amounts run through `validateExpenseAmount` — the exact stroop validator the
+ * API route uses — rather than `Number()`: float checks accepted "1e-9" and
+ * "0.000000001", both of which Stellar cannot represent, and rejected nothing
+ * a submission could legitimately send.
  */
 export const createExpenseSchema = z
   .object({
@@ -176,7 +209,15 @@ export const createExpenseSchema = z
       .string()
       .trim()
       .min(1, "Amount is required")
-      .refine((val) => !isNaN(Number(val)) && Number(val) > 0, "Amount must be a positive number"),
+      .superRefine((val, ctx) => {
+        const result = validateExpenseAmount(val);
+        if (!result.valid) {
+          ctx.addIssue({
+            code: z.ZodIssueCode.custom,
+            message: result.error ?? "Amount must be a positive number",
+          });
+        }
+      }),
     assetCode: z.string().trim().min(1, "Asset code is required"),
     payerUserId: z.string().trim().min(1, "Payer member is required"),
     splitType: z.enum(["equal", "custom", "percentage"]),
@@ -185,8 +226,10 @@ export const createExpenseSchema = z
     receiptUrl: z.string().trim().optional(),
   })
   .superRefine((data, ctx) => {
-    const total = Number(data.amount);
-    if (isNaN(total) || total <= 0) return;
+    const total = validateExpenseAmount(data.amount, data.assetCode);
+    if (!total.valid || !total.normalized) return;
+    const decimals = decimalsForAsset(data.assetCode);
+    const totalUnits = toStroops(total.normalized, decimals);
 
     if (data.splitType === "percentage") {
       const sumPercent = data.shares.reduce((acc, s) => acc + (s.percent ?? 0), 0);
@@ -200,12 +243,29 @@ export const createExpenseSchema = z
     }
 
     if (data.splitType === "custom") {
-      const sumCustom = data.shares.reduce((acc, s) => acc + Number(s.amount ?? 0), 0);
-      if (Math.abs(sumCustom - total) > 0.0001) {
+      // Exact integer sum: adding the shares as floats makes 10 + 20 + 10.0000001
+      // and 10 + 20 + 10 both look like they need a tolerance.
+      let sumUnits = 0n;
+      let malformed = false;
+      for (const share of data.shares) {
+        const raw = (share.amount ?? "0").trim();
+        if (!decimalQuantityRegex(decimals).test(raw) || decimalPlacesOf(raw) > decimals) {
+          malformed = true;
+          continue;
+        }
+        sumUnits += toStroops(raw, decimals);
+      }
+      if (malformed) {
         ctx.addIssue({
           code: z.ZodIssueCode.custom,
           path: ["shares"],
-          message: `Custom split allocations must sum to the total amount of ${data.amount} (currently ${sumCustom.toFixed(2)})`,
+          message: `Each share must be a plain number with at most ${decimals} decimal places`,
+        });
+      } else if (sumUnits !== totalUnits) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["shares"],
+          message: `Custom split allocations must sum to the total amount of ${total.normalized} (currently ${unitsToDecimal(sumUnits, decimals)})`,
         });
       }
     }
@@ -215,6 +275,9 @@ export type CreateExpenseFormInput = z.infer<typeof createExpenseSchema>;
 
 /**
  * Settlement form validation schema.
+ *
+ * Same exact-amount rule as an expense: a settlement that does not fit in
+ * integer stroops is rejected by the ledger, not by the API.
  */
 export const settleBalanceSchema = z.object({
   recipientId: z.string().trim().min(1, "Recipient ID or Public Key is required"),
@@ -222,7 +285,15 @@ export const settleBalanceSchema = z.object({
     .string()
     .trim()
     .min(1, "Amount is required")
-    .refine((val) => !isNaN(Number(val)) && Number(val) > 0, "Settlement amount must be a positive number"),
+    .superRefine((val, ctx) => {
+      const result = validateExpenseAmount(val);
+      if (!result.valid) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: result.error ?? "Settlement amount must be a positive number",
+        });
+      }
+    }),
   assetCode: z.string().trim().min(1, "Asset code is required"),
   memo: z.string().trim().optional(),
 });

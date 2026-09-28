@@ -7,23 +7,50 @@ import { Button } from "@/components/ui/button";
 import { Input, Label, FieldHint } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Calculator, Users, DollarSign, AlertCircle } from "lucide-react";
+import { isBlockedDecimalKey, isTypableAmount } from "@/lib/expenseValidation";
+import { validateExpenseAmount } from "@/lib/validation";
 
 // Zod schema matching src/lib/types.ts and backend split validations
 const participantSchema = z.object({
   id: z.string(),
   name: z.string().min(1, "Name is required"),
   included: z.boolean(),
-  customAmount: z.string().optional(),
+  // Blank while typing; anything else has to fit Stellar's precision.
+  customAmount: z
+    .string()
+    .optional()
+    .refine(
+      (val) => val === undefined || isTypableAmount(val),
+      "Share must be a number with at most 7 decimal places"
+    ),
 });
 
 const expenseSimulatorSchema = z.object({
-  totalAmount: z.string().refine((val) => {
-    const num = Number(val);
-    return !isNaN(num) && num > 0;
-  }, "Total amount must be greater than 0"),
+  totalAmount: z
+    .string()
+    .trim()
+    .min(1, "Total amount is required")
+    .superRefine((val, ctx) => {
+      const result = validateExpenseAmount(val);
+      if (!result.valid) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          message: result.error ?? "Total amount must be greater than 0",
+        });
+      }
+    }),
   splitType: z.enum(["equal", "custom"]),
   participants: z.array(participantSchema).min(1, "At least one participant is required"),
 });
+
+/** The first message Zod produced for a field, for inline rendering. */
+function fieldError(error: z.ZodError | null, ...path: (string | number)[]): string | null {
+  if (!error) return null;
+  return error.issues.find((issue) => {
+    if (issue.path.length < path.length) return false;
+    return path.every((segment, i) => issue.path[i] === segment);
+  })?.message ?? null;
+}
 
 export interface SimulatorParticipant {
   id: string;
@@ -123,6 +150,9 @@ export function ExpenseSimulator({
     });
   }, [totalAmount, splitType, participants]);
 
+  const simulatorErrors = validationResult.success ? null : validationResult.error;
+  const totalAmountError = fieldError(simulatorErrors, "totalAmount");
+
   function toggleParticipant(id: string) {
     setParticipants((prev) =>
       prev.map((p) => (p.id === id ? { ...p, included: !p.included } : p))
@@ -154,17 +184,40 @@ export function ExpenseSimulator({
             </div>
             <Input
               id="simulator-total-amount"
-              type="number"
-              step="0.0000001"
-              min="0"
+              type="text"
+              inputMode="decimal"
+              autoComplete="off"
               value={totalAmount}
-              onChange={(e) => setTotalAmount(e.target.value)}
-              className="pl-9 font-mono font-bold text-lg"
+              onChange={(e) => {
+                if (isTypableAmount(e.target.value)) setTotalAmount(e.target.value);
+              }}
+              onKeyDown={(e) => {
+                if (isBlockedDecimalKey(e.key)) e.preventDefault();
+              }}
+              className={`pl-9 font-mono font-bold text-lg ${totalAmountError ? "border-flamingo" : ""}`}
               placeholder="0.00"
               aria-label="Total expense amount"
+              aria-invalid={totalAmountError ? true : undefined}
+              aria-describedby={
+                totalAmountError ? "simulator-total-amount-error" : "simulator-total-amount-hint"
+              }
             />
           </div>
-          <FieldHint>Stellar amounts support up to 7 decimal places for precise micro-splits.</FieldHint>
+          {totalAmountError ? (
+            <p
+              id="simulator-total-amount-error"
+              role="alert"
+              className="mt-1 text-xs font-bold text-flamingo-dark"
+            >
+              {totalAmountError}
+            </p>
+          ) : (
+            <div id="simulator-total-amount-hint">
+              <FieldHint>
+                Stellar amounts support up to 7 decimal places for precise micro-splits.
+              </FieldHint>
+            </div>
+          )}
         </div>
 
         {/* Split Type Selector */}
@@ -202,7 +255,15 @@ export function ExpenseSimulator({
           </div>
 
           <div className="space-y-2" role="region" aria-label="Participants split list">
-            {calculatedShares.map((p) => (
+            {calculatedShares.map((p, index) => {
+              const customAmountError = fieldError(
+                simulatorErrors,
+                "participants",
+                index,
+                "customAmount"
+              );
+              const customAmountId = `participant-amount-${p.id}`;
+              return (
               <div
                 key={p.id}
                 className={`flex items-center justify-between gap-3 rounded-xl border-2 border-ink p-3 transition-colors ${
@@ -226,31 +287,57 @@ export function ExpenseSimulator({
                   </label>
                 </div>
 
-                <div className="flex items-center gap-2">
-                  {splitType === "custom" ? (
-                    <div className="flex items-center gap-1">
-                      <Input
-                        type="number"
-                        step="0.0000001"
-                        min="0"
-                        value={p.customAmount}
-                        disabled={!p.included}
-                        onChange={(e) => updateCustomAmount(p.id, e.target.value)}
-                        className="w-28 font-mono text-right text-sm py-1 h-9"
-                        aria-label={`Custom amount for ${p.name}`}
-                      />
-                      <span className="text-xs font-mono text-ink/60">{defaultCurrency}</span>
-                    </div>
-                  ) : (
-                    <div className="text-right">
-                      <span className="font-mono font-bold text-base text-grape">
-                        {p.share} {defaultCurrency}
-                      </span>
-                    </div>
+                <div className="flex flex-col items-end gap-1">
+                  <div className="flex items-center gap-2">
+                    {splitType === "custom" ? (
+                      <div className="flex items-center gap-1">
+                        <Input
+                          id={customAmountId}
+                          type="text"
+                          inputMode="decimal"
+                          autoComplete="off"
+                          value={p.customAmount}
+                          disabled={!p.included}
+                          onChange={(e) => {
+                            if (isTypableAmount(e.target.value)) {
+                              updateCustomAmount(p.id, e.target.value);
+                            }
+                          }}
+                          onKeyDown={(e) => {
+                            if (isBlockedDecimalKey(e.key)) e.preventDefault();
+                          }}
+                          className={`w-28 font-mono text-right text-sm py-1 h-9 ${
+                            customAmountError ? "border-flamingo" : ""
+                          }`}
+                          aria-label={`Custom amount for ${p.name}`}
+                          aria-invalid={customAmountError ? true : undefined}
+                          aria-describedby={
+                            customAmountError ? `${customAmountId}-error` : undefined
+                          }
+                        />
+                        <span className="text-xs font-mono text-ink/60">{defaultCurrency}</span>
+                      </div>
+                    ) : (
+                      <div className="text-right">
+                        <span className="font-mono font-bold text-base text-grape">
+                          {p.share} {defaultCurrency}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                  {customAmountError && (
+                    <p
+                      id={`${customAmountId}-error`}
+                      role="alert"
+                      className="text-xs font-bold text-flamingo-dark"
+                    >
+                      {customAmountError}
+                    </p>
                   )}
                 </div>
               </div>
-            ))}
+              );
+            })}
           </div>
         </div>
 
