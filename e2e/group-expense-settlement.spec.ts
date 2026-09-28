@@ -4,9 +4,37 @@ import { expect, test, type Page, type Route } from "@playwright/test";
 // Constants
 // ---------------------------------------------------------------------------
 
+/**
+ * The wallet has to report the network this build targets, or
+ * `assertWalletNetwork` refuses the sign-in. CI exports
+ * `NEXT_PUBLIC_STELLAR_NETWORK=testnet`, while a plain `npm run dev` defaults to
+ * mainnet; the Playwright web server inherits this process's environment, so
+ * reading the same variable keeps the mock and the app in step.
+ */
+const NETWORK_ALIASES: Record<string, "public" | "testnet"> = {
+  public: "public",
+  pubnet: "public",
+  mainnet: "public",
+  testnet: "testnet",
+  test: "testnet",
+};
+
+const NETWORK: "public" | "testnet" =
+  NETWORK_ALIASES[
+    (process.env.NEXT_PUBLIC_STELLAR_NETWORK ?? "").trim().toLowerCase()
+  ] ?? "public";
+
+const MOCK_NETWORK_PASSPHRASE =
+  NETWORK === "testnet"
+    ? "Test SDF Network ; September 2015"
+    : "Public Global Stellar Network ; September 2015";
+
+// Real strkeys, so the address decodes wherever the app reads it as an account
+// identity (settlement recipients and anchor destinations are validated).
 const MOCK_PUBLIC_KEY =
-  "GAXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXDV";
-const MOCK_NETWORK_PASSPHRASE = "Test SDF Network ; September 2015";
+  "GAWNUZTVWFEHLB6EGI7XDVJFFUODIPOFHW2A6PIGELHMJE5I2DEDVPKL";
+const MOCK_MEMBER_BOB_KEY =
+  "GBJBCG32YKROB2XLHCOGSSCQ3CYV6EECXAGURBRSVLWADSVQXW63SNT7";
 
 const MOCK_USER = {
   id: "user-1",
@@ -18,7 +46,7 @@ const MOCK_USER = {
 
 const MOCK_MEMBER_BOB = {
   id: "user-2",
-  stellarPublicKey: "GBXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXDV",
+  stellarPublicKey: MOCK_MEMBER_BOB_KEY,
   displayName: "Bob Testnet",
   avatarUrl: null,
   createdAt: "2026-01-01T00:00:00.000Z",
@@ -155,8 +183,21 @@ function trackPageErrors(page: Page): string[] {
  *    `getNetworkDetails`, `signTransaction`, etc.
  */
 async function mockFreighter(page: Page): Promise<void> {
+  // Everything the handler reports is passed in: `addInitScript` serializes the
+  // function, so module-level constants from the test process are not in scope
+  // inside the browser.
+  const wallet = {
+    publicKey: MOCK_PUBLIC_KEY,
+    networkPassphrase: MOCK_NETWORK_PASSPHRASE,
+    network: NETWORK.toUpperCase(),
+    networkName: NETWORK === "testnet" ? "Testnet" : "Public",
+    networkUrl:
+      NETWORK === "testnet"
+        ? "https://horizon-testnet.stellar.org"
+        : "https://horizon.stellar.org",
+  };
   await page.addInitScript(
-    ({ publicKey, networkPassphrase }) => {
+    ({ publicKey, networkPassphrase, network, networkName, networkUrl }) => {
       // isConnected() checks window.freighter before sending any message.
       (window as unknown as Record<string, unknown>)["freighter"] = true;
 
@@ -174,20 +215,22 @@ async function mockFreighter(page: Page): Promise<void> {
           case "REQUEST_CONNECTION_STATUS":
             payload = { isConnected: true };
             break;
+          case "REQUEST_ALLOWED":
           case "REQUEST_ACCESS":
           case "REQUEST_PUBLIC_KEY":
             payload = { publicKey };
             break;
           case "REQUEST_NETWORK":
-            payload = { network: "TESTNET" };
+            payload = { network };
             break;
           case "REQUEST_NETWORK_DETAILS":
             // Must be wrapped in `networkDetails` — that's what the library unpacks.
             payload = {
               networkDetails: {
-                network: "TESTNET",
+                network,
+                networkName,
+                networkUrl,
                 networkPassphrase,
-                networkUrl: "https://horizon-testnet.stellar.org",
                 sorobanRpcUrl: null,
               },
             };
@@ -204,41 +247,47 @@ async function mockFreighter(page: Page): Promise<void> {
         );
       });
     },
-    { publicKey: MOCK_PUBLIC_KEY, networkPassphrase: MOCK_NETWORK_PASSPHRASE }
+    wallet
   );
 }
 
 /**
- * Seed a fully authenticated session before the page boots.
+ * Sign in through the mocked wallet and land on the dashboard.
  *
- * Writes the Zustand `useAuth` sessionStorage key with `token`,
- * `user`, `lastAuthenticatedAt`, and `restoreStatus: "settled"` so:
- *   - `useAuth(s => s.token)` returns non-null immediately.
- *   - `useSessionRestore` skips its async Freighter check (guards on
- *     `restoreStatus !== "idle"`).
- *   - `AuthGuard` renders children instead of the loading spinner.
+ * There is no shorter way in any more. #543 made the bearer token memory-only
+ * (it never reaches Web Storage — see `src/lib/auth-store.ts` and the guard in
+ * `src/lib/persistence.vitest.test.ts`), and the reader that rehydrates the
+ * persisted identity accepts only the two public fields it validates. So the
+ * hand-written session blob this suite used to seed with `page.addInitScript`
+ * no longer buys a session: the token is not read back, and `AuthGuard` sends
+ * the page to /login. Driving the real connect → challenge → sign → verify flow
+ * is what a user does anyway, and it keeps every screen here behind an honest
+ * session.
  */
-async function seedAuthSession(page: Page): Promise<void> {
-  await page.addInitScript(
-    ({ user, token }) => {
-      try {
-        const session = {
-          state: {
-            token,
-            user,
-            lastAuthenticatedAt: new Date().toISOString(),
-            activeWalletPublicKey: user.stellarPublicKey,
-            restoreStatus: "settled",
-          },
-          version: 0,
-        };
-        sessionStorage.setItem("mergepay.token", JSON.stringify(session));
-      } catch {
-        // sessionStorage disabled — tests degrade gracefully.
-      }
-    },
-    { user: MOCK_USER, token: "mock-jwt-token" }
-  );
+async function signIn(page: Page): Promise<void> {
+  await page.goto("/login");
+  await page.getByTestId("login-connect").click();
+  await expect(page).toHaveURL(/\/dashboard$/);
+}
+
+/**
+ * `/groups`, reached by clicking.
+ *
+ * Client-side navigation only: `page.goto()` reloads the document, which drops
+ * the in-memory token, and the guard bounces back to /login.
+ */
+async function openGroupsPage(page: Page): Promise<void> {
+  await signIn(page);
+  await page.locator("aside").getByRole("link", { name: "Groups" }).click();
+  await expect(page).toHaveURL(/\/groups$/);
+}
+
+/** The mocked group's detail page, reached by clicking through from /groups. */
+async function openGroupDetail(page: Page): Promise<void> {
+  await openGroupsPage(page);
+  await page.getByTestId("group-card").click();
+  // The group page restates its paging default in the URL, so match the path.
+  await expect(page).toHaveURL(new RegExp(`/groups/${GROUP_ID}(?:\\?.*)?$`));
 }
 
 /**
@@ -374,15 +423,13 @@ test.describe("Group expense and settlement flow", () => {
   test.describe("authenticated", () => {
     test.beforeEach(async ({ page }) => {
       await mockFreighter(page);
-      await seedAuthSession(page);
     });
 
     // 1. Groups page
     test("groups page renders the group list", async ({ page }) => {
       const errors = trackPageErrors(page);
       await mountGroupDetailMocks(page);
-      await page.goto("/groups");
-      await page.waitForLoadState("domcontentloaded");
+      await openGroupsPage(page);
 
       await expect(page.getByRole("heading", { name: /your groups/i })).toBeVisible();
       await expect(page.getByRole("heading", { name: /e2e road trip/i })).toBeVisible();
@@ -395,8 +442,7 @@ test.describe("Group expense and settlement flow", () => {
     // 2. Create group dialog — POST fires and returns 201
     test("creates a new group via the dialog", async ({ page }) => {
       await mountGroupDetailMocks(page);
-      await page.goto("/groups");
-      await page.waitForLoadState("domcontentloaded");
+      await openGroupsPage(page);
       await expect(page.getByRole("heading", { name: /your groups/i })).toBeVisible();
 
       await page.getByRole("button", { name: /new group/i }).click();
@@ -419,8 +465,7 @@ test.describe("Group expense and settlement flow", () => {
     test("group detail page renders the header and expense list", async ({ page }) => {
       const errors = trackPageErrors(page);
       await mountGroupDetailMocks(page);
-      await page.goto(`/groups/${GROUP_ID}`);
-      await page.waitForLoadState("domcontentloaded");
+      await openGroupDetail(page);
 
       await expect(page.getByRole("heading", { name: /e2e road trip/i })).toBeVisible();
       await expect(page.getByText(/expenses \(1\)/i)).toBeVisible();
@@ -437,8 +482,7 @@ test.describe("Group expense and settlement flow", () => {
         Object.defineProperty(navigator, "onLine", { get: () => true, configurable: true });
       });
       await mountGroupDetailMocks(page, { expenseList: [] });
-      await page.goto(`/groups/${GROUP_ID}`);
-      await page.waitForLoadState("domcontentloaded");
+      await openGroupDetail(page);
       await expect(page.getByText(/no expenses yet/i)).toBeVisible();
 
       await page.getByRole("button", { name: /add expense/i }).click();
@@ -462,7 +506,7 @@ test.describe("Group expense and settlement flow", () => {
     test("balances panel renders correct net positions", async ({ page }) => {
       const errors = trackPageErrors(page);
       await mountGroupDetailMocks(page);
-      await page.goto(`/groups/${GROUP_ID}`);
+      await openGroupDetail(page);
 
       await expect(page.getByRole("heading", { name: /^net balances$/i })).toBeVisible();
       await expect(page.getByText(/alice stellar/i).filter({ visible: true }).first()).toBeVisible();
@@ -476,7 +520,7 @@ test.describe("Group expense and settlement flow", () => {
     // 6. Expense card — correct total and payer
     test("expense card renders the correct amount and payer", async ({ page }) => {
       await mountGroupDetailMocks(page);
-      await page.goto(`/groups/${GROUP_ID}`);
+      await openGroupDetail(page);
 
       await expect(page.getByText(/e2e dinner/i)).toBeVisible();
       await expect(page.getByText(/alice stellar/i).filter({ visible: true }).first()).toBeVisible();
@@ -486,7 +530,7 @@ test.describe("Group expense and settlement flow", () => {
     // 7. Empty state
     test("shows the empty state when a group has no expenses", async ({ page }) => {
       await mountGroupDetailMocks(page, { expenseList: [] });
-      await page.goto(`/groups/${GROUP_ID}`);
+      await openGroupDetail(page);
 
       await expect(page.getByText(/no expenses yet/i)).toBeVisible();
       await expect(page.getByText(/add the first expense/i)).toBeVisible();
@@ -495,7 +539,7 @@ test.describe("Group expense and settlement flow", () => {
     // 8. Back button is rendered and links to /dashboard
     test("back button is visible and links to the dashboard", async ({ page }) => {
       await mountGroupDetailMocks(page);
-      await page.goto(`/groups/${GROUP_ID}`);
+      await openGroupDetail(page);
 
       const backBtn = page.getByRole("button", { name: /back to dashboard/i });
       await expect(backBtn).toBeVisible();
@@ -524,7 +568,7 @@ test.describe("Group expense and settlement flow", () => {
         })
       );
 
-      await page.goto(`/groups/${GROUP_ID}`);
+      await openGroupDetail(page);
 
       await expect(page.getByText(/simplified settlement paths/i)).toBeVisible();
       await expect(page.getByText(/everyone.s square/i)).toBeVisible();
@@ -532,9 +576,9 @@ test.describe("Group expense and settlement flow", () => {
   });
 
   // ── Unauthenticated route guard ──────────────────────────────────────────
-  // Intentionally isolated — no mockFreighter, no seedAuthSession.
-  // Without window.freighter and without a persisted session, useSessionRestore
-  // calls forgetWallet() and AuthGuard redirects to /login.
+  // Intentionally isolated — no mockFreighter and no sign-in. With nothing
+  // persisted and no wallet to ask, useSessionRestore settles the restore as
+  // "logged out" and AuthGuard redirects to /login.
   test("redirects unauthenticated access to the group detail page to login", async ({
     page,
   }) => {
