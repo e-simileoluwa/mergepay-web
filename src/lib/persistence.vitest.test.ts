@@ -228,8 +228,16 @@ describe("persistence behaviour (#494)", () => {
       expect(value).not.toContain(JWT);
     }
 
-    // The session token is the auth store's own key — it belongs to
-    // sessionStorage (and is partialised out anyway), never localStorage.
-    expect(localStorage.getItem("mergepay.token")).toBeNull();
+    // The auth store's own key is `mergepay.token`, and #543 deliberately
+    // persists the *public* identity there so a reload keeps the wallet
+    // address the login screen shows. What must never appear is the
+    // credential: the bearer token lives in memory only.
+    const sessionEntry = localStorage.getItem("mergepay.token");
+    expect(sessionEntry).not.toBeNull();
+    expect(sessionEntry).not.toContain(JWT);
+    expect(Object.keys(JSON.parse(sessionEntry ?? "{}").state).sort()).toEqual([
+      "lastAuthenticatedAt",
+      "user",
+    ]);
   });
 });

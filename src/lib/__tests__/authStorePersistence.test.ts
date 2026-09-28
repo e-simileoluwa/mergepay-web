@@ -5,7 +5,7 @@ import type { User } from "../types";
 /**
  * Storage boundary tests.
  * 
- * The store is imported dynamically so a fake `sessionStorage` is in place
+ * The store is imported dynamically so a fake `localStorage` is in place
  * before the persist middleware reads it, which lets us assert on exactly
  * the bytes the app writes to the browser.
  */
@@ -52,8 +52,13 @@ before(async () => {
     STORAGE_KEY,
     JSON.stringify({ state: { token: "leaked.jwt.value", user: USER }, version: 1 })
   );
-  (globalThis as Record<string, unknown>).sessionStorage = storage;
-  (globalThis as Record<string, unknown>).localStorage = new MemoryStorage();
+  // #543 moved the public identity from `sessionStorage` to `localStorage` so
+  // a reload keeps the wallet address; `sessionStorage` stays as a decoy to
+  // prove nothing is written there, and `window` is what the storage factory
+  // reads through (there is none under node:test).
+  (globalThis as Record<string, unknown>).localStorage = storage;
+  (globalThis as Record<string, unknown>).sessionStorage = new MemoryStorage();
+  (globalThis as Record<string, unknown>).window = globalThis;
   mod = await import("../auth-store");
   await mod.useAuth.persist.rehydrate();
 });
@@ -64,7 +69,7 @@ function persistedState(): Record<string, unknown> {
   return JSON.parse(raw).state as Record<string, unknown>;
 }
 
-describe("auth store session storage persistence (#113)", () => {
+describe("auth store localStorage persistence (#113, #543)", () => {
   it("never restores a token from storage", () => {
     assert.equal(mod.getToken(), null);
     assert.equal(mod.useAuth.getState().token, null);
