@@ -18,6 +18,10 @@ import {
   extractSettlementFromTransactionPayload,
   stellarTextMemoSchema,
   mergepaySettlementMemoSchema,
+  EXPENSE_MEMO_REGEX,
+  expenseMemoSchema,
+  formatExpenseMemo,
+  parseExpenseMemo,
   STELLAR_MEMO_MAX_BYTES,
   PREFIX_BYTES,
   MAX_SHORT_CODE_BYTES,
@@ -26,6 +30,8 @@ import {
   type ParsedSettlementMemo,
   type ExtractedExpenseReference,
   type ExtractedTransactionSettlement,
+  type ExpenseMemoSource,
+  type ExpenseMemoParseResult,
 } from "./memoValidation";
 import { SETTLEMENT_MEMO_PREFIX } from "./constants";
 
@@ -42,6 +48,10 @@ export {
   extractSettlementFromTransactionPayload,
   stellarTextMemoSchema,
   mergepaySettlementMemoSchema,
+  EXPENSE_MEMO_REGEX,
+  expenseMemoSchema,
+  formatExpenseMemo,
+  parseExpenseMemo,
   STELLAR_MEMO_MAX_BYTES,
   PREFIX_BYTES,
   MAX_SHORT_CODE_BYTES,
@@ -51,6 +61,8 @@ export {
   type ParsedSettlementMemo,
   type ExtractedExpenseReference,
   type ExtractedTransactionSettlement,
+  type ExpenseMemoSource,
+  type ExpenseMemoParseResult,
 };
 
 /** Memo verification status breakdown for UI warning banners. */

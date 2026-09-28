@@ -497,3 +497,173 @@ export function extractSettlementFromTransactionPayload(
   };
 }
 
+// ---------------------------------------------------------------------------
+// Expense memo formatting & parsing (Closes #541)
+// ---------------------------------------------------------------------------
+
+/**
+ * Character set an expense memo code may use.
+ *
+ * The issue text spells the format `MP:[a-zA-Z0-9]+`, which would reject the
+ * codes this repository already produces: `generateShortCode` always inserts a
+ * hyphen before the hash suffix (`dinner-8f3a`), and `constants.ts` advertises
+ * exactly that example. Hyphen and underscore are therefore allowed after the
+ * first character — the same set `validations/memo.ts` enforces — while the
+ * first character stays alphanumeric so a code can never start or end on a
+ * separator.
+ */
+export const EXPENSE_MEMO_REGEX = /^MP:[A-Za-z0-9][A-Za-z0-9_-]*$/;
+
+/**
+ * Zod schema for expense settlement memos: the Stellar ledger constraints
+ * (≤ 28 UTF-8 bytes, no control characters) plus the `MP:` convention and the
+ * ASCII code alphabet.
+ */
+export const expenseMemoSchema = stellarTextMemoSchema.refine(
+  (val) => EXPENSE_MEMO_REGEX.test(val.trim()),
+  {
+    message:
+      `Memo must be "${SETTLEMENT_MEMO_PREFIX}" followed by letters, digits, ` +
+      "hyphens or underscores (e.g. MP:dinner-8f3a).",
+  }
+);
+
+/**
+ * Anything `formatExpenseMemo` can derive a reconciliation code from. Every
+ * field is optional so an `Expense`, a `CreateExpenseRequest` or a bare form
+ * draft can all be passed through.
+ */
+export interface ExpenseMemoSource {
+  /** Reconciliation code, with or without the `MP:` prefix. */
+  shortCode?: string | null;
+  /** Memo already attached to the expense; treated as a code source. */
+  memo?: string | null;
+  /** Human-readable label used to slug the code when none is available. */
+  label?: string | null;
+  /** Expense title, as stored on `Expense`; used when `label` is absent. */
+  title?: string | null;
+  /** Decimal amount; contributes the hash suffix so two expenses differ. */
+  amount?: string | number | null;
+}
+
+/** Strip the Mergepay prefix so a full memo can be treated as a short code. */
+function withoutSettlementPrefix(memo: string): string {
+  return memo.startsWith(SETTLEMENT_MEMO_PREFIX)
+    ? memo.slice(PREFIX_BYTES)
+    : memo;
+}
+
+/**
+ * Format the settlement memo for an expense.
+ *
+ * Uses an existing code when the expense carries one, otherwise derives
+ * `slug-hash` from the expense's title/label and amount. Returns `null` —
+ * rather than throwing — when no memo can be produced: no code source at all,
+ * a code that overflows the 25-byte budget, or a code outside
+ * {@link EXPENSE_MEMO_REGEX}. Callers can render that as "this expense cannot
+ * be settled automatically" instead of catching an exception mid-form-submit.
+ */
+export function formatExpenseMemo(
+  expense: ExpenseMemoSource | null | undefined
+): string | null {
+  if (!expense) return null;
+
+  const provided =
+    sanitizeMemoInput(expense.shortCode) ||
+    withoutSettlementPrefix(sanitizeMemoInput(expense.memo));
+  if (provided) {
+    const memo = buildSettlementMemo(provided);
+    if (memo === null || !EXPENSE_MEMO_REGEX.test(memo)) return null;
+    return memo;
+  }
+
+  const name = sanitizeMemoInput(expense.label) || sanitizeMemoInput(expense.title);
+  // Without a name there is nothing to identify the expense by; a code derived
+  // from the amount alone would collide between same-priced expenses and would
+  // not be reviewable by a human.
+  if (!name) return null;
+
+  const code = generateShortCode(name, String(expense.amount ?? ""));
+  const memo = buildSettlementMemo(code);
+  if (memo === null || !EXPENSE_MEMO_REGEX.test(memo)) return null;
+  return memo;
+}
+
+export interface ExpenseMemoParseResult {
+  valid: boolean;
+  /** `"MP:"` when the memo carries the Mergepay prefix. */
+  prefix?: string;
+  /** Reconciliation code portion after the prefix. */
+  shortCode?: string;
+  /** UTF-8 byte length of the trimmed memo. */
+  byteLength: number;
+  /** Human-readable reason when `valid` is false. */
+  error?: string;
+}
+
+/**
+ * Parse and fully validate an expense settlement memo.
+ *
+ * Stricter than `parseSettlementMemo`, which only checks the ledger
+ * constraints and the prefix: this also enforces the ASCII code alphabet, so a
+ * memo accepted here is safe to reconcile against `generateShortCode` output.
+ * Every failure mode reports its own message and the byte length it observed,
+ * which is what the settlement UI needs to explain a rejected memo.
+ */
+export function parseExpenseMemo(
+  raw: string | null | undefined
+): ExpenseMemoParseResult {
+  const memo = raw == null ? "" : raw.trim();
+  const byteLength = new TextEncoder().encode(memo).length;
+
+  if (memo === "") {
+    return {
+      valid: false,
+      byteLength: 0,
+      error: "Memo is required for expense reconciliation.",
+    };
+  }
+
+  if (byteLength > STELLAR_MEMO_MAX_BYTES) {
+    return {
+      valid: false,
+      byteLength,
+      error: `Memo exceeds the Stellar limit of ${STELLAR_MEMO_MAX_BYTES} bytes (currently ${byteLength} bytes).`,
+    };
+  }
+
+  if (!memo.startsWith(SETTLEMENT_MEMO_PREFIX)) {
+    return {
+      valid: false,
+      byteLength,
+      error: `Memo must start with the Mergepay prefix "${SETTLEMENT_MEMO_PREFIX}".`,
+    };
+  }
+
+  if (!EXPENSE_MEMO_REGEX.test(memo)) {
+    const code = memo.slice(PREFIX_BYTES);
+    let reason: string;
+    if (code === "") {
+      reason = "contains no reconciliation code";
+    } else if (!/^[A-Za-z0-9]/.test(code)) {
+      reason = "code must start with a letter or digit";
+    } else {
+      reason =
+        "code uses characters outside letters, digits, hyphens and underscores";
+    }
+    return {
+      valid: false,
+      byteLength,
+      error: `Memo ${reason} (e.g. MP:dinner-8f3a).`,
+    };
+  }
+
+  const shortCode = memo.slice(PREFIX_BYTES);
+  const codeValidation = validateShortCode(shortCode);
+  if (!codeValidation.valid) {
+    return { valid: false, byteLength, error: codeValidation.error };
+  }
+
+  return { valid: true, prefix: SETTLEMENT_MEMO_PREFIX, shortCode, byteLength };
+}
+
